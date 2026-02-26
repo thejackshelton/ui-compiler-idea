@@ -123,9 +123,9 @@ The Component State Compiler Plugin transforms consumer code at build time. Cons
 The consumer writes code that looks like:
 
 ```tsx
-const { selectedLabels } = select;
+const { getSelectedLabels } = select;
 
-<select.trigger>{selectedLabels.value.join(", ")}</select.trigger>;
+<select.trigger>{getSelectedLabels.value.join(", ")}</select.trigger>;
 ```
 
 The plugin transforms it to effectively be:
@@ -222,7 +222,7 @@ export const MySelect = component$(() => {
 });
 ```
 
-The compiler detects `select.getSelectedLabels` (a state property per the manifest), finds the JSX expression container that uses it, and wraps the entire expression in a generated `component$()`.
+The compiler detects `select.getSelectedLabels` (a state getter per the `get` prefix convention), finds the JSX expression container that uses it, and wraps the entire expression in a generated `component$()`.
 
 ### Simple State Access
 
@@ -260,27 +260,27 @@ const labels = select.getSelectedLabels;
 
 ```tsx
 // Consumer writes:
-const { selectedLabels } = select;
+const { getSelectedLabels } = select;
 
 // ...later in JSX:
-<span>{selectedLabels.value.join(", ")}</span>;
+<span>{getSelectedLabels.value.join(", ")}</span>;
 
-// Compiler tracks that `selectedLabels` was destructured from `select`,
+// Compiler tracks that `getSelectedLabels` was destructured from `select`,
 // detects the JSX expression, and generates the component$ wrapper.
 ```
 
 Destructuring is a variant of alias tracking. The plugin walks `ObjectPattern` nodes in `VariableDeclarator`, checks if the initializer is a tracked namespace identifier, and records each destructured property as an alias binding — the same mechanism used for `const labels = select.getSelectedLabels`.
 
-Only nested or renamed destructuring emits a build error:
+Only nested destructuring emits a build error:
 
 ```tsx
 // ERROR: nested destructuring — cannot track
-const { selectedLabels: { value: labels } } = select;
+const { getSelectedLabels: { value: labels } } = select;
 ```
 
 ### Component Exports Are Unchanged
 
-`select.root`, `select.trigger`, `select.content`, `select.item`, `select.itemlabel` are all component exports in the manifest. The compiler does not transform them. They continue to work exactly as JSX elements:
+`select.root`, `select.trigger`, `select.content`, `select.item`, `select.itemlabel` are all component exports (no `get` prefix). The compiler does not transform them. They continue to work exactly as JSX elements:
 
 ```tsx
 // These are component exports — no transformation:
@@ -332,10 +332,10 @@ Hand-authored manifests must stay in sync with component context types. Forgetti
 
 The select namespace exposes these state getters:
 
-- `select.getIsOpen` → `ctx.isOpen: Signal<boolean>`
-- `select.getSelectedLabels` → `ctx.selectedLabels: Signal<string[]>` (derived)
-- `select.getSelectedValues` → `ctx.selectedValues: Signal<string | string[]>`
-- `select.getHighlightedIndex` → `ctx.highlightedIndex: Signal<number | null>`
+- `select.getIsOpen` → `ctx.isOpen: ReadonlySignal<boolean>`
+- `select.getSelectedLabels` → `ctx.selectedLabels: ReadonlySignal<string[]>` (derived)
+- `select.getSelectedValues` → `ctx.selectedValues: ReadonlySignal<string | string[]>`
+- `select.getHighlightedIndex` → `ctx.highlightedIndex: ReadonlySignal<number | null>`
 
 Adding a new getter to any component requires:
 1. Add the `Signal<T>` field to the context type (or `useComputed$` for derived state).
@@ -369,7 +369,7 @@ Parse the file and find import declarations from `@qds.dev/ui`:
 import { select } from "@qds.dev/ui";
 
 // Detection result:
-// { localName: "select", manifest: selectManifest }
+// { localName: "select", importedName: "select" }
 ```
 
 Walk `ImportDeclaration` nodes. For each specifier where `source.value === "@qds.dev/ui"`, record the local binding name:
@@ -390,13 +390,13 @@ Walk the entire AST. For each `MemberExpression` where the object is a tracked n
 ```typescript
 // select.getSelectedLabels
 // ^^^^^^ object: tracked namespace identifier
-//        ^^^^^^^^^^^^^^ property: state descriptor in manifest
+//        ^^^^^^^^^^^^^^ property: starts with "get" → state getter
 
 type StateReference = {
   node: MemberExpression;
   namespace: BoundNamespace;
-  propertyName: string; // "selectedLabels"
-  descriptor: StateDescriptor;
+  getterName: string; // "getSelectedLabels"
+  contextField: string; // "selectedLabels" (derived: strip "get", lowercase first letter)
   start: number; // source position
   end: number; // source position
 };
@@ -422,23 +422,23 @@ Walk `VariableDeclarator` nodes. Two patterns produce alias bindings:
 **Destructuring:**
 
 ```typescript
-// const { selectedLabels, isOpen } = select;
-//        ^^^^^^^^^^^^^^  ^^^^^^     ^^^^^^ initializer: tracked namespace identifier
-//        |               |
+// const { getSelectedLabels, getIsOpen } = select;
+//        ^^^^^^^^^^^^^^^^^  ^^^^^^^^^     ^^^^^^ initializer: tracked namespace identifier
+//        |                  |
 //        alias for select.getSelectedLabels
-//                        alias for select.getIsOpen
+//                           alias for select.getIsOpen
 ```
 
-For destructuring, walk `ObjectPattern` nodes inside `VariableDeclarator`. If the `init` is a tracked namespace identifier, check each destructured property name against the manifest. For each property that is a state descriptor, record an `AliasBinding`. If any property has a nested `ObjectPattern` (deep destructuring), emit a build error — deep destructuring cannot be tracked.
+For destructuring, walk `ObjectPattern` nodes inside `VariableDeclarator`. If the `init` is a tracked namespace identifier, check each destructured property name for the `get` prefix. For each property that starts with `get`, record an `AliasBinding`. If any property has a nested `ObjectPattern` (deep destructuring), emit a build error — deep destructuring cannot be tracked.
 
 Both patterns produce the same record:
 
 ```typescript
 type AliasBinding = {
-  localName: string; // "labels" or "selectedLabels"
+  localName: string; // "labels" or "getSelectedLabels"
   namespace: BoundNamespace;
-  propertyName: string; // "selectedLabels"
-  descriptor: StateDescriptor;
+  getterName: string; // "getSelectedLabels"
+  contextField: string; // "selectedLabels" (derived: strip "get", lowercase first letter)
 };
 ```
 
@@ -624,7 +624,7 @@ If the same state property is referenced in multiple JSX expression containers i
 
 ### What the Context Must Expose
 
-For the generated component to be minimal and correct, each state property referenced in the manifest must correspond to a direct field on the context object that the generated component can read.
+For the generated component to be minimal and correct, each state getter (identified by the `get` prefix) must correspond to a direct field on the context object that the generated component can read.
 
 For fields that already exist on the context as signals (like `isOpen`, `selectedValues`, `highlightedIndex`), no changes are needed. The generated component reads them directly.
 
@@ -698,17 +698,17 @@ const ctx = useContext(selectContextId);
 
 The following `SelectContext` fields are already signals and need no changes:
 
-- `isOpen: Signal<boolean>` — maps to `select.getIsOpen`
-- `selectedValues: Signal<string | string[]>` — maps to `select.getSelectedValues`
-- `highlightedIndex: Signal<number | null>` — maps to `select.getHighlightedIndex`
+- `isOpen: ReadonlySignal<boolean>` — maps to `select.getIsOpen`
+- `selectedValues: ReadonlySignal<string | string[]>` — maps to `select.getSelectedValues`
+- `highlightedIndex: ReadonlySignal<number | null>` — maps to `select.getHighlightedIndex`
 
 ### Pattern for New Components
 
 When adding state properties to other components (checkbox, menu, etc.), component authors must:
 
-1. Ensure the field is a `Signal<T>` on the context type.
+1. Ensure the field is a `ReadonlySignal<T>` on the context type.
 2. For derived state, add a `useComputed$()` in the root component and expose it on the context.
-3. Add the corresponding entry to the manifest file.
+3. Export it on the namespace with a `get` prefix.
 4. Export the `contextId` from the component's `index.ts` so the plugin can inject the import.
 
 ---
@@ -745,15 +745,15 @@ The original `const labels = select.getSelectedLabels;` declaration is left in p
 ### Destructuring
 
 ```tsx
-const { selectedLabels } = select;
+const { getSelectedLabels } = select;
 ```
 
 Destructuring is supported via the same mechanism as alias tracking. The plugin walks `ObjectPattern` nodes in `VariableDeclarator`. When the initializer (`init`) is a tracked namespace identifier, each `BindingProperty` in the `ObjectPattern.properties` array provides a `key` (the original property name) and `value` (the local binding). The plugin records each destructured property as an `AliasBinding` — the same record type used for `const labels = select.getSelectedLabels`.
 
-For the example above, `selectedLabels` is recorded as an alias for `select.getSelectedLabels`. When used in JSX:
+For the example above, `getSelectedLabels` is recorded as an alias for `select.getSelectedLabels`. When used in JSX:
 
 ```tsx
-<span>{selectedLabels.value.join(", ")}</span>
+<span>{getSelectedLabels.value.join(", ")}</span>
 ```
 
 The generated component replaces it with the context reference:
@@ -768,7 +768,7 @@ const _QdsSelectSelectedLabels0 = component$(() => {
 Renamed destructuring also works:
 
 ```tsx
-const { selectedLabels: labels } = select;
+const { getSelectedLabels: labels } = select;
 // `labels` is tracked as an alias for `select.getSelectedLabels`
 ```
 
@@ -776,10 +776,10 @@ Only **nested destructuring** emits a build error — deep patterns cannot be re
 
 ```tsx
 // ERROR: nested destructuring
-const { selectedLabels: { value: labels } } = select;
+const { getSelectedLabels: { value: labels } } = select;
 ```
 
-Detection: Walk `ObjectPattern` nodes inside `VariableDeclarator`. If the `init` is a tracked namespace identifier, check each destructured property name against the manifest. For properties with a nested `ObjectPattern` value (deep destructuring), emit the build error. For simple and renamed destructuring, record an `AliasBinding`.
+Detection: Walk `ObjectPattern` nodes inside `VariableDeclarator`. If the `init` is a tracked namespace identifier, check each destructured property name for the `get` prefix. For properties with a nested `ObjectPattern` value (deep destructuring), emit the build error. For simple and renamed destructuring, record an `AliasBinding`.
 
 This is consistent with Phase 3 (Section 4) which describes alias and destructuring tracking as a unified mechanism, and with Section 2 which shows the consumer-facing DX.
 
@@ -1076,7 +1076,7 @@ MDX files in documentation often include live component examples. Adding support
 IDE autocompletion for `select.getSelectedLabels` would require a TypeScript language service plugin that:
 
 1. Intercepts member expression completions on QDS namespace imports.
-2. Reads the manifest to provide state property names as completions.
+2. Provides `get`-prefixed state property names as completions based on the namespace's context type.
 3. Provides hover documentation explaining the compiler transform.
 
 This is independent of the build plugin and would be developed as a separate package or extension to the existing TypeScript configuration.
