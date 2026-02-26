@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document specifies the QDS UI Plugin: a Vite/Rolldown build plugin that detects when consumers reference QDS component namespace state properties (e.g., `select.selectedLabels`) inside JSX and automatically generates `component$()` boundaries so those references have proper Qwik context access.
+This document specifies the QDS UI Plugin: a Vite/Rolldown build plugin that detects when consumers reference QDS component namespace getter properties (e.g., `select.getSelectedLabels`) inside JSX and automatically generates `component$()` boundaries so those references have proper Qwik context access. The plugin uses a naming convention — the `get` prefix — to distinguish state getters from component exports, eliminating the need for hand-authored manifests.
 
 File location: `libs/tools/rolldown/ui.ts`
 Plugin name: `vite-plugin-qds-ui`
@@ -62,7 +62,7 @@ return (
 
 This defeats the purpose of the component managing its own state. The consumer is now responsible for state management, event wiring, and keeping things in sync. This is a well-documented pain point — consumers across every major headless library hit the same wall when they need to read internal state for custom rendering:
 
-- **Radix UI:** [Get selected ItemText content other than with SelectValue](https://github.com/radix-ui/primitives/issues/2609) — consumer needs selected label text for a custom input trigger, but it's locked inside `<SelectValue>` and there's no way to get the string. This is literally the `select.selectedLabels` use case.
+- **Radix UI:** [Get selected ItemText content other than with SelectValue](https://github.com/radix-ui/primitives/issues/2609) — consumer needs selected label text for a custom input trigger, but it's locked inside `<SelectValue>` and there's no way to get the string. This is literally the `select.getSelectedLabels` use case.
 - **Radix UI:** [Expose Collapsible Context](https://github.com/radix-ui/primitives/issues/2473) — consumer needs `open` state inside a custom CollapsibleTrigger to render different chevron icons based on state. Reading state for custom JSX rendering inside the tree.
 - **Headless UI:** [Combobox open state outside the component](https://github.com/tailwindlabs/headlessui/discussions/1852) — consumer had to create a renderless wrapper component just to pass open state upward. This is exactly the manual `component$()` wrapper problem.
 - **Ark UI:** [React 3.0](https://github.com/chakra-ui/ark/issues/2330) — Ark redesigned their entire v3 API to add `Component.Context` render-prop components across every component because reading internal state was too painful. A library-level breaking change driven by this problem.
@@ -203,10 +203,10 @@ export const MySelect = component$(() => {
   return (
     <select.root multiple>
       <select.trigger>
-        {select.selectedLabels.value.length > 3 ? (
-          <span>{select.selectedLabels.value.length} selected</span>
+        {select.getSelectedLabels.value.length > 3 ? (
+          <span>{select.getSelectedLabels.value.length} selected</span>
         ) : (
-          select.selectedLabels.value.map((l) => <span class="chip">{l}</span>)
+          select.getSelectedLabels.value.map((l) => <span class="chip">{l}</span>)
         )}
       </select.trigger>
       <select.content>
@@ -222,13 +222,13 @@ export const MySelect = component$(() => {
 });
 ```
 
-The compiler detects `select.selectedLabels` (a state property per the manifest), finds the JSX expression container that uses it, and wraps the entire expression in a generated `component$()`.
+The compiler detects `select.getSelectedLabels` (a state property per the manifest), finds the JSX expression container that uses it, and wraps the entire expression in a generated `component$()`.
 
 ### Simple State Access
 
 ```tsx
 // Consumer writes:
-<p>You selected: {select.selectedLabels.value}</p>
+<p>You selected: {select.getSelectedLabels.value}</p>
 
 // Compiler generates (conceptual):
 <p>You selected: <_QdsSelectSelectedLabels0 /></p>
@@ -238,7 +238,7 @@ The compiler detects `select.selectedLabels` (a state property per the manifest)
 
 ```tsx
 // Consumer writes:
-<div>{select.isOpen.value ? "Open" : "Closed"}</div>
+<div>{select.getIsOpen.value ? "Open" : "Closed"}</div>
 
 // Compiler generates:
 <div><_QdsSelectIsOpen0 /></div>
@@ -248,11 +248,11 @@ The compiler detects `select.selectedLabels` (a state property per the manifest)
 
 ```tsx
 // Consumer writes:
-const labels = select.selectedLabels;
+const labels = select.getSelectedLabels;
 // ...later in JSX:
 <span>{labels.value.join(", ")}</span>;
 
-// Compiler tracks that `labels` aliases `select.selectedLabels`,
+// Compiler tracks that `labels` aliases `select.getSelectedLabels`,
 // detects the JSX expression, and generates the component$ wrapper.
 ```
 
@@ -269,7 +269,7 @@ const { selectedLabels } = select;
 // detects the JSX expression, and generates the component$ wrapper.
 ```
 
-Destructuring is a variant of alias tracking. The plugin walks `ObjectPattern` nodes in `VariableDeclarator`, checks if the initializer is a tracked namespace identifier, and records each destructured property as an alias binding — the same mechanism used for `const labels = select.selectedLabels`.
+Destructuring is a variant of alias tracking. The plugin walks `ObjectPattern` nodes in `VariableDeclarator`, checks if the initializer is a tracked namespace identifier, and records each destructured property as an alias binding — the same mechanism used for `const labels = select.getSelectedLabels`.
 
 Only nested or renamed destructuring emits a build error:
 
@@ -293,110 +293,55 @@ const { selectedLabels: { value: labels } } = select;
 
 ---
 
-## Section 3: Manifest Format
+## Section 3: Detection by Naming Convention
 
-### Purpose
+### The `get` Prefix Convention
 
-The manifest tells the plugin which properties of each QDS namespace are component exports versus state properties. Without the manifest, the plugin cannot distinguish `select.root` (a component) from `select.selectedLabels` (state).
+The plugin distinguishes state getters from component exports using a naming convention: any property on a QDS namespace that starts with `get` is a state getter. Everything else is a component.
 
-### Format Definition
-
-Each QDS component namespace has a manifest object. The manifest is a flat map of property name to descriptor:
-
-```typescript
-type ComponentDescriptor = "component";
-
-type StateDescriptor = {
-  type: "state";
-  contextId: string; // The string ID passed to createContextId — e.g. "qds-select"
-  contextIdExport: string; // The exported name of the context ID — e.g. "selectContextId"
-  contextIdSource: string; // The package path to import contextId from
-  field: string; // The field name on the context object
-  signalType: string; // TypeScript type of the signal value for the generated component
-  derived?: true; // True when the value requires computation beyond a direct field read
-};
-
-type ManifestEntry = ComponentDescriptor | StateDescriptor;
-
-type ComponentManifest = Record<string, ManifestEntry>;
+```
+select.root              → component (no "get" prefix)
+select.trigger           → component
+select.getSelectedLabels → state getter (has "get" prefix)
+select.getIsOpen         → state getter
 ```
 
-### Select Manifest (Reference Implementation)
+No manifest files. No registry. No syncing. The naming convention IS the detection mechanism.
 
-```typescript
-// libs/tools/rolldown/manifests/select.ts
+### Convention-Based Resolution
 
-import type { ComponentManifest } from "../ui-types";
+The plugin derives everything it needs from the getter name and namespace:
 
-export const selectManifest: ComponentManifest = {
-  root: "component",
-  trigger: "component",
-  content: "component",
-  item: "component",
-  itemlabel: "component",
-  label: "component",
-  valuelabel: "component",
-  itemindicator: "component",
+| Input | Derived Value | Rule |
+|-------|--------------|------|
+| Namespace: `select` | Context ID export: `selectContextId` | `{namespace}ContextId` |
+| Namespace: `select` | Context ID import: `@qds.dev/ui` | Always the QDS package |
+| Getter: `getSelectedLabels` | Context field: `selectedLabels` | Strip `get`, lowercase first letter |
+| Getter: `getIsOpen` | Context field: `isOpen` | Strip `get`, lowercase first letter |
 
-  // State properties — these trigger the compiler transform
-  isOpen: {
-    type: "state",
-    contextId: "qds-select",
-    contextIdExport: "selectContextId",
-    contextIdSource: "@qds.dev/ui",
-    field: "isOpen",
-    signalType: "boolean"
-  },
-  selectedLabels: {
-    type: "state",
-    contextId: "qds-select",
-    contextIdExport: "selectContextId",
-    contextIdSource: "@qds.dev/ui",
-    field: "selectedLabels",
-    signalType: "string[]",
-    derived: true // computed from selectedValues + itemLabelText
-  },
-  selectedValues: {
-    type: "state",
-    contextId: "qds-select",
-    contextIdExport: "selectContextId",
-    contextIdSource: "@qds.dev/ui",
-    field: "selectedValues",
-    signalType: "string | string[]"
-  },
-  highlightedIndex: {
-    type: "state",
-    contextId: "qds-select",
-    contextIdExport: "selectContextId",
-    contextIdSource: "@qds.dev/ui",
-    field: "highlightedIndex",
-    signalType: "number | null"
-  }
-};
-```
+For the generated component, the plugin:
+1. Imports `{namespace}ContextId` from `@qds.dev/ui`
+2. Calls `useContext({namespace}ContextId)`
+3. Reads `ctx.{field}` where `{field}` is the getter name with `get` stripped
 
-### Master Registry
+### Why Not a Manifest
 
-All namespace manifests are collected into a master registry keyed by the import namespace name:
+Hand-authored manifests must stay in sync with component context types. Forgetting an entry means silent bugs. The `get` prefix convention is self-enforcing: if a component author exports `getIsOpen` on the namespace, the plugin handles it automatically. No second file to update, no registry to maintain.
 
-```typescript
-// libs/tools/rolldown/manifests/index.ts
+### Select Getters (Reference)
 
-import { selectManifest } from "./select";
-// import { checkboxManifest } from "./checkbox";
-// ... other components
+The select namespace exposes these state getters:
 
-export const qdsManifests: Record<string, ComponentManifest> = {
-  select: selectManifest
-  // checkbox: checkboxManifest,
-};
-```
+- `select.getIsOpen` → `ctx.isOpen: Signal<boolean>`
+- `select.getSelectedLabels` → `ctx.selectedLabels: Signal<string[]>` (derived)
+- `select.getSelectedValues` → `ctx.selectedValues: Signal<string | string[]>`
+- `select.getHighlightedIndex` → `ctx.highlightedIndex: Signal<number | null>`
 
-### Where Manifests Live
+Adding a new getter to any component requires:
+1. Add the `Signal<T>` field to the context type (or `useComputed$` for derived state).
+2. Export it on the namespace with a `get` prefix.
 
-Manifests are static TypeScript files checked into `libs/tools/rolldown/manifests/`. They are authored by QDS component maintainers when adding state properties to the public API surface.
-
-A future build step (not part of this spec) could generate manifests automatically from component context type definitions. For now, they are written by hand. The authoring burden is low: a new state property requires one entry in the manifest file plus a corresponding context field (see Section 5).
+That's it. The plugin picks it up automatically.
 
 ---
 
@@ -407,8 +352,8 @@ A future build step (not part of this spec) could generate manifests automatical
 The plugin transform runs on each `.tsx` or `.jsx` file. It:
 
 1. Parses the file with oxc-parser.
-2. Detects QDS namespace imports and maps them to manifests.
-3. Walks the AST to find state property references.
+2. Detects QDS namespace imports.
+3. Walks the AST to find `get`-prefixed property references (state getters).
 4. Tracks aliases (variable assignments to state properties).
 5. Finds JSX expression containers containing state references.
 6. Generates replacement `component$()` declarations.
@@ -427,24 +372,23 @@ import { select } from "@qds.dev/ui";
 // { localName: "select", manifest: selectManifest }
 ```
 
-Walk `ImportDeclaration` nodes. For each specifier where `source.value === "@qds.dev/ui"`, check if the imported name exists in `qdsManifests`. If so, record:
+Walk `ImportDeclaration` nodes. For each specifier where `source.value === "@qds.dev/ui"`, record the local binding name:
 
 ```typescript
 type BoundNamespace = {
   localName: string; // "select" (or alias like "mySelect")
-  manifestKey: string; // "select" (the key in qdsManifests)
-  manifest: ComponentManifest;
+  importedName: string; // "select" (the original export name)
 };
 ```
 
-If no QDS state namespaces are found, return `null` (no transform needed).
+If no QDS namespace imports are found, return `null` (no transform needed).
 
 ### Phase 2: Reference Tracking
 
-Walk the entire AST. For each `MemberExpression` where the object is a tracked namespace identifier and the property is a state descriptor in the manifest:
+Walk the entire AST. For each `MemberExpression` where the object is a tracked namespace identifier and the property name starts with `get`:
 
 ```typescript
-// select.selectedLabels
+// select.getSelectedLabels
 // ^^^^^^ object: tracked namespace identifier
 //        ^^^^^^^^^^^^^^ property: state descriptor in manifest
 
@@ -469,7 +413,7 @@ Walk `VariableDeclarator` nodes. Two patterns produce alias bindings:
 **Direct assignment:**
 
 ```typescript
-// const labels = select.selectedLabels;
+// const labels = select.getSelectedLabels;
 //       ^^^^^^   ^^^^^^^^^^^^^^^^^^^^^ initializer: state member expression
 //       |
 //       alias identifier
@@ -481,8 +425,8 @@ Walk `VariableDeclarator` nodes. Two patterns produce alias bindings:
 // const { selectedLabels, isOpen } = select;
 //        ^^^^^^^^^^^^^^  ^^^^^^     ^^^^^^ initializer: tracked namespace identifier
 //        |               |
-//        alias for select.selectedLabels
-//                        alias for select.isOpen
+//        alias for select.getSelectedLabels
+//                        alias for select.getIsOpen
 ```
 
 For destructuring, walk `ObjectPattern` nodes inside `VariableDeclarator`. If the `init` is a tracked namespace identifier, check each destructured property name against the manifest. For each property that is a state descriptor, record an `AliasBinding`. If any property has a nested `ObjectPattern` (deep destructuring), emit a build error — deep destructuring cannot be tracked.
@@ -517,7 +461,7 @@ type TransformTarget = {
 };
 ```
 
-A single JSX expression container may reference multiple state properties (e.g., `{select.isOpen.value && select.selectedLabels.value.join(", ")}`). In that case, one generated component handles all state access within that container.
+A single JSX expression container may reference multiple state properties (e.g., `{select.getIsOpen.value && select.getSelectedLabels.value.join(", ")}`). In that case, one generated component handles all state access within that container.
 
 ### Phase 5: Code Generation
 
@@ -541,17 +485,17 @@ When a single container references multiple state properties, use the first prop
 Generate the component body. For each state reference within the container, replace the member expression with a context field access:
 
 ```typescript
-// State reference: select.selectedLabels
+// State reference: select.getSelectedLabels
 // Generated replacement: ctx.selectedLabels
 ```
 
-The full expression from the original JSX container is preserved, but with `select.selectedLabels` replaced by `ctx.selectedLabels`:
+The full expression from the original JSX container is preserved, but with `select.getSelectedLabels` replaced by `ctx.selectedLabels`:
 
 ```typescript
 // Input container expression:
-select.selectedLabels.value.length > 3
-  ? <span>{select.selectedLabels.value.length} selected</span>
-  : select.selectedLabels.value.map(l => <span class="chip">{l}</span>)
+select.getSelectedLabels.value.length > 3
+  ? <span>{select.getSelectedLabels.value.length} selected</span>
+  : select.getSelectedLabels.value.map(l => <span class="chip">{l}</span>)
 
 // Generated component body:
 const _QdsSelectSelectedLabels0 = component$(() => {
@@ -606,10 +550,10 @@ export const MySelect = component$(() => {
   return (
     <select.root multiple>
       <select.trigger>
-        {select.selectedLabels.value.length > 3 ? (
-          <span>{select.selectedLabels.value.length} selected</span>
+        {select.getSelectedLabels.value.length > 3 ? (
+          <span>{select.getSelectedLabels.value.length} selected</span>
         ) : (
-          select.selectedLabels.value.map((l) => <span class="chip">{l}</span>)
+          select.getSelectedLabels.value.map((l) => <span class="chip">{l}</span>)
         )}
       </select.trigger>
       <select.content>
@@ -754,9 +698,9 @@ const ctx = useContext(selectContextId);
 
 The following `SelectContext` fields are already signals and need no changes:
 
-- `isOpen: Signal<boolean>` — maps to `select.isOpen`
-- `selectedValues: Signal<string | string[]>` — maps to `select.selectedValues`
-- `highlightedIndex: Signal<number | null>` — maps to `select.highlightedIndex`
+- `isOpen: Signal<boolean>` — maps to `select.getIsOpen`
+- `selectedValues: Signal<string | string[]>` — maps to `select.getSelectedValues`
+- `highlightedIndex: Signal<number | null>` — maps to `select.getHighlightedIndex`
 
 ### Pattern for New Components
 
@@ -774,13 +718,13 @@ When adding state properties to other components (checkbox, menu, etc.), compone
 ### Aliasing
 
 ```tsx
-const labels = select.selectedLabels;
+const labels = select.getSelectedLabels;
 
 // Later in JSX:
 <p>{labels.value.join(", ")}</p>;
 ```
 
-The plugin tracks `labels` as an alias for `select.selectedLabels`. When it encounters `labels.value` inside a JSX expression container, it generates the same wrapping as for a direct `select.selectedLabels.value` reference.
+The plugin tracks `labels` as an alias for `select.getSelectedLabels`. When it encounters `labels.value` inside a JSX expression container, it generates the same wrapping as for a direct `select.getSelectedLabels.value` reference.
 
 The generated component replaces `labels.value` with `ctx.selectedLabels.value`:
 
@@ -796,7 +740,7 @@ const _QdsSelectSelectedLabels0 = component$(() => {
 </p>;
 ```
 
-The original `const labels = select.selectedLabels;` declaration is left in place. It will be dead code after the transform, but that is acceptable — tree-shaking or minification removes it in production.
+The original `const labels = select.getSelectedLabels;` declaration is left in place. It will be dead code after the transform, but that is acceptable — tree-shaking or minification removes it in production.
 
 ### Destructuring
 
@@ -804,9 +748,9 @@ The original `const labels = select.selectedLabels;` declaration is left in plac
 const { selectedLabels } = select;
 ```
 
-Destructuring is supported via the same mechanism as alias tracking. The plugin walks `ObjectPattern` nodes in `VariableDeclarator`. When the initializer (`init`) is a tracked namespace identifier, each `BindingProperty` in the `ObjectPattern.properties` array provides a `key` (the original property name) and `value` (the local binding). The plugin records each destructured property as an `AliasBinding` — the same record type used for `const labels = select.selectedLabels`.
+Destructuring is supported via the same mechanism as alias tracking. The plugin walks `ObjectPattern` nodes in `VariableDeclarator`. When the initializer (`init`) is a tracked namespace identifier, each `BindingProperty` in the `ObjectPattern.properties` array provides a `key` (the original property name) and `value` (the local binding). The plugin records each destructured property as an `AliasBinding` — the same record type used for `const labels = select.getSelectedLabels`.
 
-For the example above, `selectedLabels` is recorded as an alias for `select.selectedLabels`. When used in JSX:
+For the example above, `selectedLabels` is recorded as an alias for `select.getSelectedLabels`. When used in JSX:
 
 ```tsx
 <span>{selectedLabels.value.join(", ")}</span>
@@ -825,7 +769,7 @@ Renamed destructuring also works:
 
 ```tsx
 const { selectedLabels: labels } = select;
-// `labels` is tracked as an alias for `select.selectedLabels`
+// `labels` is tracked as an alias for `select.getSelectedLabels`
 ```
 
 Only **nested destructuring** emits a build error — deep patterns cannot be reliably tracked:
@@ -842,12 +786,12 @@ This is consistent with Phase 3 (Section 4) which describes alias and destructur
 ### Prop Passing
 
 ```tsx
-<MyComponent labels={select.selectedLabels} />
+<MyComponent labels={select.getSelectedLabels} />
 ```
 
 This case passes a state property as a prop to another component. The consumer likely intends to pass the `Signal<string[]>` to `MyComponent`, which will read `.value` inside its own `component$()`.
 
-This case is handled by the same JSX expression container detection: the prop value `select.selectedLabels` is a `JSXExpressionContainer`. The plugin wraps it:
+This case is handled by the same JSX expression container detection: the prop value `select.getSelectedLabels` is a `JSXExpressionContainer`. The plugin wraps it:
 
 ```tsx
 <MyComponent labels={<_QdsSelectSelectedLabels0 />} />
@@ -858,14 +802,14 @@ But this changes the type of the prop from `Signal<string[]>` to a JSX element, 
 The correct behavior for this case is to emit a build-time error or warning:
 
 ```
-[vite-plugin-qds-ui] QDS state property 'select.selectedLabels'
+[vite-plugin-qds-ui] QDS state property 'select.getSelectedLabels'
 is used as a JSX prop value for '<MyComponent labels={...}>'.
 
 State properties cannot be passed as props to other components because they
 require a Qwik context boundary. Options:
   1. Access the state inside <MyComponent> using the compiler transform.
   2. Use bind: binding if MyComponent supports it.
-  3. Pass the value (not the signal): {select.selectedLabels.value}
+  3. Pass the value (not the signal): {select.getSelectedLabels.value}
      Note: passing .value passes a snapshot, not a reactive signal.
 ```
 
@@ -878,13 +822,13 @@ When two `<select.root>` elements appear on the same page:
 ```tsx
 <select.root id="select-a">
   <select.trigger>
-    {select.selectedLabels.value}  {/* refers to which select? */}
+    {select.getSelectedLabels.value}  {/* refers to which select? */}
   </select.trigger>
 </select.root>
 
 <select.root id="select-b">
   <select.trigger>
-    {select.selectedLabels.value}  {/* refers to which select? */}
+    {select.getSelectedLabels.value}  {/* refers to which select? */}
   </select.trigger>
 </select.root>
 ```
@@ -905,7 +849,7 @@ If a consumer writes:
 
 ```tsx
 {
-  select.selectedLabels.value.join(", ");
+  select.getSelectedLabels.value.join(", ");
 }
 ```
 
@@ -915,7 +859,7 @@ On SSR the generated component renders `""` (empty string from `[].join(", ")`).
 
 ```tsx
 {
-  isActive && select.selectedLabels.value;
+  isActive && select.getSelectedLabels.value;
 }
 ```
 
@@ -936,7 +880,7 @@ If `isActive` is a signal from the parent scope (`isActive.value`), the generate
 
 ```tsx
 {
-  `You chose: ${select.selectedLabels.value.join(", ")}`;
+  `You chose: ${select.getSelectedLabels.value.join(", ")}`;
 }
 ```
 
@@ -953,29 +897,29 @@ const _QdsSelectSelectedLabels0 = component$(() => {
 
 ```tsx
 {
-  select.selectedLabels.value.join(", ");
+  select.getSelectedLabels.value.join(", ");
 }
 {
-  select.selectedLabels.value.length;
+  select.getSelectedLabels.value.length;
 }
 {
-  select.selectedLabels.value.map((l) => <span>{l}</span>);
+  select.getSelectedLabels.value.map((l) => <span>{l}</span>);
 }
 ```
 
-All of these are member accesses or method calls on `.value`. The state reference is `select.selectedLabels` (the `MemberExpression` at the namespace property level). The plugin replaces `select.selectedLabels` with `ctx.selectedLabels` and leaves the rest of the access chain unchanged:
+All of these are member accesses or method calls on `.value`. The state reference is `select.getSelectedLabels` (the `MemberExpression` at the namespace property level). The plugin replaces `select.getSelectedLabels` with `ctx.selectedLabels` and leaves the rest of the access chain unchanged:
 
-- `select.selectedLabels.value.join(", ")` → `ctx.selectedLabels.value.join(", ")`
-- `select.selectedLabels.value.length` → `ctx.selectedLabels.value.length`
-- `select.selectedLabels.value.map(...)` → `ctx.selectedLabels.value.map(...)`
+- `select.getSelectedLabels.value.join(", ")` → `ctx.selectedLabels.value.join(", ")`
+- `select.getSelectedLabels.value.length` → `ctx.selectedLabels.value.length`
+- `select.getSelectedLabels.value.map(...)` → `ctx.selectedLabels.value.map(...)`
 
-The replacement is purely textual at the `select.selectedLabels` node boundaries (start/end position), not at deeper access levels.
+The replacement is purely textual at the `select.getSelectedLabels` node boundaries (start/end position), not at deeper access levels.
 
 ### State Access Outside JSX
 
 ```tsx
 const handleClick$ = $(() => {
-  console.log(select.selectedLabels.value); // inside event handler
+  console.log(select.getSelectedLabels.value); // inside event handler
 });
 ```
 
@@ -998,9 +942,7 @@ Emit a build warning (not error) when state access is found inside `$()` boundar
 
 ```
 libs/tools/rolldown/ui.ts
-libs/tools/rolldown/manifests/
-libs/tools/rolldown/manifests/index.ts
-libs/tools/rolldown/manifests/select.ts
+libs/tools/rolldown/ui-types.ts
 ```
 
 ### Export from Index
@@ -1103,13 +1045,9 @@ The recommended approach: use `walk()` with `ScopeTracker` for Phase 3 (alias/de
 ```typescript
 // ui.ts — main plugin entry
 // ui-types.ts — shared type definitions
-// manifests/index.ts — master registry
-// manifests/select.ts — select component manifest
-// manifests/checkbox.ts — (future)
-// manifests/menu.ts — (future)
 ```
 
-The types module (`ui-types.ts`) exports `ComponentManifest`, `StateDescriptor`, `BoundNamespace`, `StateReference`, `AliasBinding`, and `TransformTarget`. These are consumed by both the plugin and the manifest files.
+The types module (`ui-types.ts`) exports `BoundNamespace`, `StateReference`, `AliasBinding`, and `TransformTarget`.
 
 ---
 
@@ -1135,7 +1073,7 @@ MDX files in documentation often include live component examples. Adding support
 
 ### Future: TypeScript Plugin for Autocompletion
 
-IDE autocompletion for `select.selectedLabels` would require a TypeScript language service plugin that:
+IDE autocompletion for `select.getSelectedLabels` would require a TypeScript language service plugin that:
 
 1. Intercepts member expression completions on QDS namespace imports.
 2. Reads the manifest to provide state property names as completions.
@@ -1143,20 +1081,9 @@ IDE autocompletion for `select.selectedLabels` would require a TypeScript langua
 
 This is independent of the build plugin and would be developed as a separate package or extension to the existing TypeScript configuration.
 
-### Future: Manifest Generation from Source
+### Future: Write Support via Automatic `bind:` Injection
 
-Currently, manifests are hand-authored. A future build step could generate them automatically by:
-
-1. Parsing each component's context type definition (`SelectContext`, etc.) using oxc-parser.
-2. Extracting field names and signal types.
-3. Distinguishing context fields from non-signal config fields (e.g., `multiple: boolean` vs `isOpen: Signal<boolean>`).
-4. Generating manifest entries for all `Signal<T>` fields.
-
-This would eliminate the manual step of keeping manifests synchronized with context type changes.
-
-### Future: Warning for Unused State Properties in Manifest
-
-After the transform runs, the plugin could emit development-mode warnings when a state property is in the manifest but never referenced in any consumer file. This would help QDS maintainers identify state properties that should be removed from the manifest.
+The plugin currently handles read-only state access. A future version could detect write expressions (e.g., `select.getIsOpen.value = false` in event handlers) and automatically inject `bind:` props on the Root component, eliminating the need for consumers to manually wire `bind:` for writes. This would unify reads and writes under one mental model (`select.getX` for everything), but adds significant compiler complexity around `$()` boundary detection and Root-to-signal wiring.
 
 ---
 
@@ -1171,13 +1098,6 @@ For the implementer building this plugin, the following steps cover the full sco
 - [ ] Include `selectedLabels` in the context object passed to `useContextProvider`
 - [ ] Export `selectContextId` from `libs/components/src/select/index.ts` (if not already)
 - [ ] Verify `selectContextId` is accessible via `@qds.dev/ui` barrel export
-
-**Manifest files (libs/tools/rolldown/manifests/):**
-
-- [ ] Create `manifests/` directory
-- [ ] Create `ui-types.ts` with type definitions
-- [ ] Create `manifests/select.ts` with `selectManifest`
-- [ ] Create `manifests/index.ts` with `qdsManifests` registry
 
 **Plugin implementation (libs/tools/rolldown/ui.ts):**
 
@@ -1203,8 +1123,8 @@ For the implementer building this plugin, the following steps cover the full sco
 
 - [ ] Test: no QDS import — returns null (no transform)
 - [ ] Test: component-only namespace usage — returns null (no state refs)
-- [ ] Test: simple state access `select.isOpen.value`
-- [ ] Test: complex expression `select.selectedLabels.value.length > 3 ? ... : ...`
+- [ ] Test: simple state access `select.getIsOpen.value`
+- [ ] Test: complex expression `select.getSelectedLabels.value.length > 3 ? ... : ...`
 - [ ] Test: aliased state property
 - [ ] Test: simple destructuring tracked as alias
 - [ ] Test: nested destructuring emits build error
