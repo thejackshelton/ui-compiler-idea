@@ -60,7 +60,14 @@ return (
 );
 ```
 
-This defeats the purpose of the component managing its own state. The consumer is now responsible for state management, event wiring, and keeping things in sync. Every headless library's GitHub issues are full of "how do I access X from outside Root" questions.
+This defeats the purpose of the component managing its own state. The consumer is now responsible for state management, event wiring, and keeping things in sync. This is a well-documented pain point — consumers across every major headless library hit the same wall when they need to read internal state for custom rendering:
+
+- **Radix UI:** [Get selected ItemText content other than with SelectValue](https://github.com/radix-ui/primitives/issues/2609) — consumer needs selected label text for a custom input trigger, but it's locked inside `<SelectValue>` and there's no way to get the string. This is literally the `select.selectedLabels` use case.
+- **Radix UI:** [Expose Collapsible Context](https://github.com/radix-ui/primitives/issues/2473) — consumer needs `open` state inside a custom CollapsibleTrigger to render different chevron icons based on state. Reading state for custom JSX rendering inside the tree.
+- **Headless UI:** [Combobox open state outside the component](https://github.com/tailwindlabs/headlessui/discussions/1852) — consumer had to create a renderless wrapper component just to pass open state upward. This is exactly the manual `component$()` wrapper problem.
+- **Ark UI:** [React 3.0](https://github.com/chakra-ui/ark/issues/2330) — Ark redesigned their entire v3 API to add `Component.Context` render-prop components across every component because reading internal state was too painful. A library-level breaking change driven by this problem.
+
+The standard answer across all these libraries is "use controlled mode" — which forces consumers to lift all state into their own framework state, defeating the ergonomic benefits of the compound component pattern.
 
 In Qwik, the controlled state workaround exists too, but it's even more constrained: render props and callback-as-child patterns don't work because closures can't be serialized across the resumability boundary. There is no clean runtime-only escape hatch.
 
